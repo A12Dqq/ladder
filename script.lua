@@ -1,1 +1,483 @@
+-- [[ MERGED SCRIPT - MADE BY A12Dqq ]] --
+
+-- GLOBAL VARIABLES
+local player = game.Players.LocalPlayer
+local camera = workspace.CurrentCamera
+local run, UIS = game:GetService("RunService"), game:GetService("UserInputService")
+local starterGui = game:GetService("StarterGui")
+
+local holding, target, holdDistance, anchoredWhileHolding = false, nil, 10, false
+local holdLeft, holdRight, holdQ, holdE = false, false, false, false
+
+-- Script Life Cycle
+local scriptRunning = true
+
+-- Physics/Noclip State
+local noclipActive = false
+
+-- Physical Forces
+local vel = Instance.new("BodyVelocity")
+vel.MaxForce = Vector3.new(1, 1, 1) * 1e5
+vel.P = 12500
+
+local gyro = Instance.new("BodyGyro")
+gyro.MaxTorque = Vector3.new(1, 1, 1) * 1e6
+gyro.P = 3000
+
+local originalRotation = nil
+
+-- Visual Outline (SelectionBox)
+local SelectionBox = Instance.new("SelectionBox")
+SelectionBox.Name = "Outline"
+SelectionBox.LineThickness = 0.08
+SelectionBox.Parent = game:GetService("CoreGui")
+
+-- Magnet Settings
+local magnetActive, magnetRadius, magnetForce = false, 30, 200
+local magnetObjects, gravityBackup = {}, {}
+local currentRadius = magnetRadius
+
+-- Advanced Visual Circle
+local usingDrawing = Drawing and Drawing.new and typeof(Drawing.new)=="function"
+local magnetCircle, circleGui, circleImg
+local circleColor = Color3.fromRGB(0,170,255)
+local surfacePos, surfaceNormal = Vector3.zero, Vector3.new(0,1,0)
+
+if usingDrawing then
+	magnetCircle = Drawing.new("Circle")
+	magnetCircle.Visible, magnetCircle.Transparency, magnetCircle.Color, magnetCircle.Thickness, magnetCircle.Filled = false, 1, circleColor, 2, false
+else
+	circleGui = Instance.new("BillboardGui")
+	circleGui.Name, circleGui.Size, circleGui.SizeOffset, circleGui.AlwaysOnTop = "MagnetCircleGui", UDim2.new(2,0,2,0), Vector2.new(0,0), true
+	circleGui.Parent = workspace
+	circleImg = Instance.new("ImageLabel")
+	circleImg.BackgroundTransparency, circleImg.Image, circleImg.ImageColor3 = 1, "rbxassetid://13523341990", circleColor
+	circleImg.AnchorPoint, circleImg.Position, circleImg.Size = Vector2.new(0.5,0.5), UDim2.fromScale(0.5,0.5), UDim2.fromScale(1,1)
+	circleImg.Parent, circleGui.Enabled = circleImg, false
+end
+
+-- Virtual mouse
+local virtualMouseSize = 60 
+local virtualMouseEnabled = UIS.TouchEnabled 
+local virtualMouseCenter = Vector2.new(0.5, 0.45)
+
+-- GUI references
+local GUIrefs = {}
+local guiHidden = false
+
+-- Utilities
+local function notify(title, text)
+    starterGui:SetCore("SendNotification", {
+        Title = title;
+        Text = text;
+        Duration = 2;
+    })
+end
+
+local function isCharacterPart(obj)
+	for _, plr in ipairs(game.Players:GetPlayers()) do
+		if plr.Character and obj:IsDescendantOf(plr.Character) then return true end
+	end
+	return false
+end
+
+local function isAccessory(obj)
+    return obj:FindFirstAncestorOfClass("Accessory") ~= nil
+end
+
+local function restoreGravity()
+	for obj, oldGravity in pairs(gravityBackup) do
+		if obj and obj:IsDescendantOf(workspace) then obj.CustomPhysicalProperties = oldGravity end
+	end
+	gravityBackup = {}
+end
+
+local function lerpVec3(a, b, t) return a + (b - a) * t end
+
+local function getScreenSize()
+	local vs = camera.ViewportSize
+	return vs.X, vs.Y
+end
+
+local function computeVirtualCenterPixels()
+	local sx, sy = getScreenSize()
+	return Vector2.new(sx * virtualMouseCenter.X, sy * virtualMouseCenter.Y)
+end
+
+local function getInputPosition()
+	if UIS.TouchEnabled and virtualMouseEnabled then
+		local vmPos = computeVirtualCenterPixels()
+		return vmPos.X, vmPos.Y
+	end
+	local pos = UIS:GetMouseLocation()
+	return pos.X, pos.Y
+end
+
+local function raycastFromScreen(x, y, maxDist)
+	local ray = camera:ScreenPointToRay(x, y)
+	local dist = maxDist or 1000
+	return workspace:FindPartOnRayWithIgnoreList(Ray.new(ray.Origin, ray.Direction * dist), {player.Character})
+end
+
+-- KILL SCRIPT
+local function killScript()
+    scriptRunning = false
+    noclipActive = false
+    if GUIrefs.screenGui then GUIrefs.screenGui:Destroy() end
+    if SelectionBox then SelectionBox:Destroy() end
+    if magnetCircle then magnetCircle:Remove() end
+    if circleGui then circleGui:Destroy() end
+    for _, part in pairs(workspace:GetDescendants()) do
+        if part:IsA("BasePart") then part.CanCollide = true end
+    end
+    restoreGravity()
+    if vel then vel:Destroy() end
+    if gyro then gyro:Destroy() end
+    notify("Status", "Script Terminated")
+end
+
+local function updateButtonStates()
+	if not scriptRunning then return end
+	if GUIrefs.magnetBtn and GUIrefs.grabBtn and GUIrefs.noclipBtn then
+		if magnetActive then
+			GUIrefs.magnetBtn.BackgroundColor3 = Color3.fromRGB(25,130,255)
+			GUIrefs.magnetBtn.Text = "Magnet ✓"
+		else
+			GUIrefs.magnetBtn.BackgroundColor3 = Color3.fromRGB(30,30,30)
+			GUIrefs.magnetBtn.Text = "Magnet"
+		end
+		
+		if holding then
+			GUIrefs.grabBtn.BackgroundColor3 = Color3.fromRGB(0, 200, 100)
+			GUIrefs.grabBtn.Text = "Release"
+		else
+			GUIrefs.grabBtn.BackgroundColor3 = Color3.fromRGB(30,30,30)
+			GUIrefs.grabBtn.Text = "Grab"
+		end
+		
+		if noclipActive then
+			GUIrefs.noclipBtn.BackgroundColor3 = Color3.fromRGB(0, 200, 100)
+			GUIrefs.noclipBtn.Text = "Noclip ON"
+		else
+			GUIrefs.noclipBtn.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+			GUIrefs.noclipBtn.Text = "Noclip OFF"
+		end
+	end
+end
+
+local function updateVMVisuals()
+	if not scriptRunning then return end
+	local screenX, screenY = getScreenSize()
+	local vPos = computeVirtualCenterPixels()
+	if not GUIrefs.screenGui then return end
+	
+	if GUIrefs.vm and vPos then
+		local px = math.clamp(vPos.X - virtualMouseSize/2, 0, screenX - virtualMouseSize)
+		local py = math.clamp(vPos.Y - virtualMouseSize/2, 0, screenY - virtualMouseSize)
+		GUIrefs.vm.Position = UDim2.new(0, px, 0, py)
+		GUIrefs.vm.Visible = not guiHidden
+	end
+	
+	if GUIrefs.vmCircle then
+		local cx, cy = getInputPosition()
+		local radiusScreenScale = 2.0 
+		local radPx = math.clamp(math.floor(magnetRadius * radiusScreenScale), 8, math.min(screenX, screenY))
+		GUIrefs.vmCircle.Size = UDim2.new(0, radPx*2, 0, radPx*2)
+		GUIrefs.vmCircle.Position = UDim2.new(0, cx - radPx, 0, cy - radPx)
+		GUIrefs.vmCircle.ImageColor3 = magnetActive and Color3.fromRGB(60,170,255) or Color3.fromRGB(80,80,80)
+		GUIrefs.vmCircle.Visible = magnetActive and (not guiHidden)
+	end
+end
+
+run.RenderStepped:Connect(function()
+	if not scriptRunning then return end
+	if guiHidden then
+		SelectionBox.Adornee = nil
+	else
+		if magnetActive and not holding then
+			SelectionBox.Adornee = nil
+		else
+			if holding and target then
+				SelectionBox.Color3, SelectionBox.Adornee = Color3.fromRGB(150, 50, 255), target
+			else
+				local sx, sy = getInputPosition()
+				local hit, pos = raycastFromScreen(sx, sy, 1000)
+				if hit and hit:IsA("BasePart") and not hit.Anchored and not isCharacterPart(hit) then
+					SelectionBox.Color3, SelectionBox.Adornee = Color3.fromRGB(0,170,255), hit
+				else
+					SelectionBox.Adornee = nil
+				end
+			end
+		end
+	end
+
+	if magnetActive and not guiHidden then
+		local sx, sy = getInputPosition()
+		local ray = camera:ScreenPointToRay(sx, sy)
+		local hit, pos, norm = workspace:FindPartOnRayWithIgnoreList(Ray.new(ray.Origin, ray.Direction * 1000), {player.Character})
+		if hit then
+			surfacePos, surfaceNormal = lerpVec3(surfacePos,pos,0.35), lerpVec3(surfaceNormal,norm,0.35)
+		else
+			local defPos = ray.Origin + ray.Direction * 15
+			surfacePos, surfaceNormal = lerpVec3(surfacePos,defPos,0.15), lerpVec3(surfaceNormal,Vector3.new(0,1,0),0.15)
+		end
+		currentRadius = currentRadius + (magnetRadius - currentRadius) * 0.25
+		if usingDrawing then
+			local screenPos = camera:WorldToViewportPoint(surfacePos)
+			magnetCircle.Visible, magnetCircle.Position, magnetCircle.Radius = true, Vector2.new(screenPos.X, screenPos.Y), currentRadius
+		else
+			circleGui.Enabled, circleGui.Size = true, UDim2.new(0,currentRadius*2,0,currentRadius*2)
+			circleGui.CFrame = CFrame.new(surfacePos, surfacePos + camera.CFrame.LookVector)
+				* CFrame.fromMatrix(Vector3.zero,
+					surfaceNormal:Cross(Vector3.new(0,1,0)).Magnitude>0.01 and surfaceNormal:Cross(Vector3.new(0,1,0)).Unit or Vector3.new(1,0,0),
+					surfaceNormal,
+					-surfaceNormal:Cross(Vector3.new(1,0,0)).Unit)
+			circleGui.Position = surfacePos
+		end
+	else
+		if usingDrawing then magnetCircle.Visible = false
+		elseif circleGui then circleGui.Enabled = false end
+	end
+	updateVMVisuals()
+	updateButtonStates()
+end)
+
+run.Heartbeat:Connect(function()
+	if not scriptRunning then return end
+    if player.Character then
+        for _, item in pairs(player.Character:GetDescendants()) do
+            if item:IsA("BasePart") and isAccessory(item) then item.CanCollide = false end
+        end
+    end
+    if noclipActive then
+        for _, part in pairs(workspace:GetDescendants()) do
+            if part:IsA("BasePart") and not part.Anchored and not isCharacterPart(part) and not isAccessory(part) then
+                part.CanCollide = false
+            end
+        end
+    end
+
+	if holding and target then
+		if not anchoredWhileHolding then
+			local sx, sy = getInputPosition()
+			local ray = camera:ScreenPointToRay(sx, sy)
+			local grabPos = ray.Origin + ray.Direction.Unit * holdDistance
+			vel.Velocity = (grabPos - target.Position) * 5
+			if originalRotation then gyro.CFrame = originalRotation + target.Position end
+		else
+			vel.Velocity = Vector3.zero
+		end
+	end
+
+	if magnetActive then
+		local center, newAttracted = surfacePos, {}
+		local nearby = workspace:GetPartBoundsInBox(CFrame.new(center), Vector3.new(magnetRadius*2, magnetRadius*2, magnetRadius*2))
+		for _, obj in ipairs(nearby) do
+			if obj:IsA("BasePart") and not obj.Anchored and not isCharacterPart(obj) and obj.Transparency < 1 and obj.CanCollide and obj ~= target then
+				local bv = obj:FindFirstChild("MagnetBV") or Instance.new("BodyVelocity")
+				bv.Name, bv.MaxForce, bv.P = "MagnetBV", Vector3.new(1,1,1)*1e5, 15000
+				local dir = (center - obj.Position) * Vector3.new(1,0,1)
+				bv.Velocity = dir.Magnitude > 0 and dir.Unit * magnetForce or Vector3.zero
+				bv.Parent = obj
+				if not gravityBackup[obj] then
+					gravityBackup[obj] = obj.CustomPhysicalProperties
+					obj.CustomPhysicalProperties = PhysicalProperties.new(0, 0.3, 0.5, 1, 1)
+				end
+				newAttracted[obj] = true
+			end
+		end
+		for obj in pairs(magnetObjects) do
+			if not newAttracted[obj] then
+				if obj and obj:FindFirstChild("MagnetBV") then obj.MagnetBV:Destroy() end
+				if gravityBackup[obj] then obj.CustomPhysicalProperties = gravityBackup[obj]; gravityBackup[obj] = nil end
+			end
+		end
+		magnetObjects = newAttracted
+	else
+		for obj in pairs(magnetObjects) do if obj and obj:FindFirstChild("MagnetBV") then obj.MagnetBV:Destroy() end end
+		restoreGravity()
+		magnetObjects = {}
+	end
+
+	if magnetActive then
+		if holdLeft or holdQ then magnetRadius = math.max(5, magnetRadius - 1.3)
+		elseif holdRight or holdE then magnetRadius = math.min(200, magnetRadius + 1.3) end
+	else
+		if holdLeft or holdQ then holdDistance = math.max(2, holdDistance - 0.4)
+		elseif holdRight or holdE then holdDistance = math.min(1000, holdDistance + 0.4) end
+	end
+end)
+
+function grabOrRelease()
+	if not scriptRunning or magnetActive then return end
+	if holding then
+		originalRotation, vel.Parent, gyro.Parent, anchoredWhileHolding, target, holding = nil, nil, nil, false, nil, false
+		notify("Grabber", "Object Released ✋")
+	else
+		local sx, sy = getInputPosition()
+		local part, pos = raycastFromScreen(sx, sy, 1000)
+		if part and part:IsA("BasePart") and not part.Anchored and not isCharacterPart(part) then
+			target, anchoredWhileHolding = part, false
+			originalRotation = part.CFrame - part.Position
+			gyro.CFrame, gyro.Parent, vel.Velocity, vel.Parent = originalRotation + part.Position, part, Vector3.zero, part
+			holdDistance = (camera.CFrame.Position - pos).Magnitude
+			holding = true
+			notify("Grabber", "Object Caught ✊")
+		end
+	end
+    updateButtonStates()
+end
+
+function throw()
+	if not scriptRunning or magnetActive or not holding or not target then return end
+	if anchoredWhileHolding then target.Anchored, anchoredWhileHolding = false, false end
+	vel.Parent, gyro.Parent, holding, originalRotation = nil, nil, false, nil
+	local impulse = Instance.new("BodyVelocity")
+	impulse.Velocity, impulse.MaxForce, impulse.P, impulse.Parent = camera.CFrame.LookVector * 1000, Vector3.new(1,1,1)*1e6, 12500, target
+	game:GetService("Debris"):AddItem(impulse, 0.5)
+	target = nil
+	notify("Grabber", "Object Thrown")
+	updateButtonStates()
+end
+
+function toggleAnchor()
+	if not scriptRunning or magnetActive or not holding or not target then return end
+	anchoredWhileHolding = not anchoredWhileHolding
+	target.Anchored = anchoredWhileHolding
+	if anchoredWhileHolding then
+		vel.Parent, gyro.Parent = nil, nil
+		target.AssemblyLinearVelocity, target.AssemblyAngularVelocity = Vector3.zero, Vector3.zero
+		notify("Anchor", "Object Locked 📌")
+	else
+		vel.Parent, gyro.Parent = target, target
+		notify("Anchor", "Object Unlocked ❌")
+	end
+end
+
+function toggleMagnet()
+	if not scriptRunning or holding then return end
+	magnetActive = not magnetActive
+	if not magnetActive then restoreGravity() end
+	notify("Magnet", magnetActive and "Magnet Enabled 🧲" or "Magnet Disabled")
+	updateButtonStates()
+end
+
+function toggleNoclip()
+    if not scriptRunning then return end
+    noclipActive = not noclipActive
+    if not noclipActive then
+        for _, part in pairs(workspace:GetDescendants()) do
+            if part:IsA("BasePart") and not part.Anchored and not isCharacterPart(part) and not isAccessory(part) then
+                part.CanCollide = true
+            end
+        end
+    end
+    notify("Noclip", noclipActive and "Noclip Enabled 👻" or "Noclip Disabled ❌")
+    updateButtonStates()
+end
+
+-- MOBILE GUI
+local function createMobileGUI()
+	local screenGui = Instance.new("ScreenGui")
+	screenGui.Name, screenGui.ResetOnSpawn, screenGui.Parent = "LevitatoMobileGui", false, player:WaitForChild("PlayerGui")
+	GUIrefs.screenGui = screenGui
+
+	local bottomBar = Instance.new("Frame", screenGui)
+	bottomBar.AnchorPoint, bottomBar.Size, bottomBar.Position = Vector2.new(0.5, 1), UDim2.new(0.95, 0, 0, 110), UDim2.new(0.5, 0, 1, -20)
+	bottomBar.BackgroundColor3, bottomBar.BackgroundTransparency, bottomBar.BorderSizePixel = Color3.fromRGB(20,20,20), 0.45, 0
+	Instance.new("UICorner", bottomBar).CornerRadius = UDim.new(0, 18)
+	local stroke = Instance.new("UIStroke", bottomBar)
+	stroke.Color, stroke.Thickness = Color3.fromRGB(80,80,80), 2
+
+    -- FIXED CREDIT LABEL
+    local creditLabel = Instance.new("TextLabel")
+    creditLabel.Name = "CreditLabel"
+    creditLabel.Size = UDim2.new(1, 0, 0, 25)
+    creditLabel.Position = UDim2.new(0, 0, 0, 8)
+    creditLabel.BackgroundTransparency = 1
+    creditLabel.Text = "MADE BY A12Dqq"
+    creditLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+    creditLabel.Font = Enum.Font.GothamBold
+    creditLabel.TextSize = 13
+    creditLabel.ZIndex = 5
+    creditLabel.Parent = bottomBar
+    GUIrefs.creditLabel = creditLabel
+
+    -- CONTAINER FOR BUTTONS (Keeps layout away from text)
+    local buttonContainer = Instance.new("Frame", bottomBar)
+    buttonContainer.Size = UDim2.new(1, 0, 1, -30)
+    buttonContainer.Position = UDim2.new(0, 0, 0, 30)
+    buttonContainer.BackgroundTransparency = 1
+
+	local layout = Instance.new("UIListLayout", buttonContainer)
+	layout.FillDirection, layout.HorizontalAlignment, layout.VerticalAlignment, layout.Padding = Enum.FillDirection.Horizontal, Enum.HorizontalAlignment.Center, Enum.VerticalAlignment.Center, UDim.new(0, 8)
+
+	local function makeButton(name, text, size)
+		local b = Instance.new("TextButton")
+		b.Name, b.Text, b.Size = name, text, size or UDim2.new(0,95,0,60)
+		b.Font, b.TextScaled, b.TextColor3 = Enum.Font.GothamBold, true, Color3.fromRGB(240,240,240)
+		b.BackgroundColor3, b.BackgroundTransparency = Color3.fromRGB(30,30,30), 0.55
+		Instance.new("UICorner", b).CornerRadius = UDim.new(0,14)
+		return b
+	end
+
+    local noclipBtn = makeButton("NoclipBtn", "Noclip OFF", UDim2.new(0,100,0,62))
+	noclipBtn.Parent = buttonContainer
+	local anchorBtn = makeButton("AnchorBtn", "Anchor", UDim2.new(0,95,0,62))
+	anchorBtn.Parent = buttonContainer
+	local zoomInBtn = makeButton("ZoomInBtn", "+", UDim2.new(0,45,0,45))
+	zoomInBtn.Parent = buttonContainer
+	local zoomOutBtn = makeButton("ZoomOutBtn", "-", UDim2.new(0,45,0,45))
+	zoomOutBtn.Parent = buttonContainer
+	local magnetBtn = makeButton("MagnetBtn", "Magnet", UDim2.new(0,95,0,62))
+	magnetBtn.Parent = buttonContainer
+	local grabBtn = makeButton("GrabBtn", "Grab", UDim2.new(0,95,0,62))
+	grabBtn.Parent = buttonContainer
+	local throwBtn = makeButton("ThrowBtn", "Throw", UDim2.new(0,95,0,62))
+	throwBtn.Parent = buttonContainer
+
+	GUIrefs.noclipBtn, GUIrefs.anchorBtn, GUIrefs.zoomInBtn, GUIrefs.zoomOutBtn, GUIrefs.magnetBtn, GUIrefs.grabBtn, GUIrefs.throwBtn = noclipBtn, anchorBtn, zoomInBtn, zoomOutBtn, magnetBtn, grabBtn, throwBtn
+
+    noclipBtn.MouseButton1Click:Connect(toggleNoclip)
+	magnetBtn.MouseButton1Click:Connect(toggleMagnet)
+	grabBtn.MouseButton1Click:Connect(grabOrRelease)
+	throwBtn.MouseButton1Click:Connect(throw)
+	anchorBtn.MouseButton1Click:Connect(toggleAnchor)
+	zoomInBtn.MouseButton1Down:Connect(function() holdRight = true end)
+	zoomInBtn.MouseButton1Up:Connect(function() holdRight = false end)
+	zoomOutBtn.MouseButton1Down:Connect(function() holdLeft = true end)
+	zoomOutBtn.MouseButton1Up:Connect(function() holdLeft = false end)
+
+    local hideBtn = makeButton("HideBtn", "Hide UI", UDim2.new(0, 80, 0, 35))
+    hideBtn.AnchorPoint, hideBtn.Position, hideBtn.Parent = Vector2.new(1, 0), UDim2.new(1, -10, 0, 10), screenGui
+    
+    local closeBtn = makeButton("CloseBtn", "X", UDim2.new(0, 25, 0, 25))
+    closeBtn.BackgroundColor3, closeBtn.AnchorPoint, closeBtn.Position, closeBtn.ZIndex, closeBtn.Visible, closeBtn.Parent = Color3.fromRGB(200, 50, 50), Vector2.new(1, 0), UDim2.new(1, -5, 0, -10), 10, false, hideBtn
+    
+    hideBtn.MouseButton1Click:Connect(function()
+        guiHidden = not guiHidden
+        bottomBar.Visible = not guiHidden
+        closeBtn.Visible = guiHidden 
+        hideBtn.Text = guiHidden and "Show UI" or "Hide UI"
+    end)
+    
+    closeBtn.MouseButton1Click:Connect(killScript)
+
+	local vm = Instance.new("Frame", screenGui)
+	vm.Size = UDim2.new(0, virtualMouseSize, 0, virtualMouseSize)
+	vm.BackgroundTransparency, vm.BackgroundColor3, vm.ZIndex = 0.6, Color3.fromRGB(10,10,10), 2
+	Instance.new("UICorner", vm).CornerRadius = UDim.new(1,0)
+	Instance.new("UIStroke", vm).Color, Instance.new("UIStroke", vm).Thickness = Color3.fromRGB(60,160,255), 2
+	GUIrefs.vm = vm
+
+	local vmCircle = Instance.new("ImageLabel", screenGui)
+	vmCircle.BackgroundTransparency, vmCircle.Image, vmCircle.ImageColor3, vmCircle.ImageTransparency, vmCircle.ZIndex = 1, "rbxassetid://13523341990", circleColor, 0.5, 1
+	GUIrefs.vmCircle = vmCircle
+
+	screenGui.Enabled = UIS.TouchEnabled
+end
+
+createMobileGUI()
+updateButtonStates()
+notify("Script Status", "Ready to Use")
 
